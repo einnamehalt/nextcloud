@@ -1,0 +1,103 @@
+version: '2'
+
+volumes:
+  nextcloud:
+  db:
+
+services:
+  db:
+    container_name: nextcloud-db
+    image: mariadb:11.1.2
+    restart: always
+    command: --transaction-isolation=READ-COMMITTED --log-bin=binlog --binlog-format=ROW
+    volumes:
+      - db:/var/lib/mysql
+    environment:
+      - "MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PW}"
+      - "MYSQL_PASSWORD=${MYSQL_PW}"
+      - MYSQL_DATABASE=nextcloud
+      - MYSQL_USER=nextcloud
+    networks:
+      nextcloud_network:
+    labels:
+      - "traefik.enable=false"
+      
+  redis:
+    image: redis:alpine3.18
+    container_name: nextcloud-redis
+    volumes:
+      - /docker/nextcloud/redis:/data
+    networks:
+      - nextcloud_network
+    restart: unless-stopped        
+    command: >
+          --requirepass ${REDIS_PW}
+    labels:
+      - "traefik.enable=false"
+
+  cloud:
+    container_name: nextcloud-app
+    image: nextcloud:27.0.2
+    restart: always
+    ports:
+      - 8080:80
+    links:
+      - db
+      - redis
+    volumes:
+      - nextcloud:/var/www/html
+    environment:
+      - "MYSQL_PASSWORD=${MYSQL_PW}"
+      - MYSQL_DATABASE=nextcloud
+      - MYSQL_USER=nextcloud
+      - MYSQL_HOST=db
+      - TRUSTED_PROXIES=172.16.0.0/12  
+      - "OVERWRITEHOST=${OVERWRITEHOST}"
+      - OVERWRITEPROTOCOL=https
+      - REDIS_HOST=redis
+      - "REDIS_HOST_PASSWORD=${REDIS_PW}"
+
+    labels:
+      # Default labels, no changes needed
+      - "traefik.docker.network=proxy"
+      - "traefik.enable=true"
+      - "traefik.http.routers.nextcloud.entrypoints=websecure"
+      - "traefik.http.routers.nextcloud.tls=true"
+
+      # add https proxy headers
+      - "traefik.http.middlewares.nextcloud-headers.headers.referrerPolicy=no-referrer"
+      - "traefik.http.middlewares.nextcloud-headers.headers.sslRedirect=true"
+      - "traefik.http.middlewares.nextcloud-headers.headers.stsSeconds=315360000"
+      - "traefik.http.middlewares.nextcloud-headers.headers.browserXSSFilter=true"
+      - "traefik.http.middlewares.nextcloud-headers.headers.contentTypeNosniff=true"
+      - "traefik.http.middlewares.nextcloud-headers.headers.forceSTSHeader=true"
+      - "traefik.http.middlewares.nextcloud-headers.headers.stsIncludeSubdomains=true"
+      - "traefik.http.middlewares.nextcloud-headers.headers.stsPreload=true"
+      - "traefik.http.middlewares.nextcloud-headers.headers.customFrameOptionsValue=SAMEORIGIN"
+     
+      - "traefik.http.routers.nextcloud.service=nextcloud"
+      - "traefik.http.routers.nextcloud.middlewares=nextcloud-dav,nextcloud-headers"
+      - "traefik.http.services.nextcloud.loadbalancer.server.port=80"
+
+      # Special Nextcloud labels
+      - "traefik.http.middlewares.nextcloud-dav.redirectregex.regex=https://(.*)/.well-known/(card|cal)dav"
+      - "traefik.http.middlewares.nextcloud-dav.redirectregex.replacement=https://$$1/remote.php/dav/"
+      - "traefik.http.middlewares.nextcloud-dav.redirectregex.permanent=true"
+    networks:
+      nextcloud_network:
+    sysctls:
+      - net.ipv6.conf.all.disable_ipv6=0
+      - net.ipv6.conf.eth0.proxy_ndp=1      
+
+networks:
+  nextcloud_network:
+    enable_ipv6: true
+    #driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: "${NEXTCLOUD_NETWORK_SUBNET}::/${NEXTCLOUD_NETWORK_SUBNET_MASK}"
+          gateway: "${NEXTCLOUD_NETWORK_SUBNET}::1"
+
+# docker exec --user www-data nextcloud-app php occ config:system:set default_phone_region --value="DE"
+# docker restart nextcloud-app
